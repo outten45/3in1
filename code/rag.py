@@ -1,6 +1,7 @@
 # Import necessary libraries
 import os
-import json
+
+# import json
 import requests
 import math
 from openai import OpenAI
@@ -16,11 +17,32 @@ RED = "\033[91m"
 RESET = "\033[0m"
 BOLD = "\033[1m"
 
+# MODEL="llama3.2"
+# MODEL = "ollama/llama3.3:70b"
+MODEL = "ollama/llama3.2:3b"
 
 # Connect to local Ollama server (running Llama3.2 model)
+# client = OpenAI(
+#     base_url='http://localhost:11434/v1',
+#     api_key='ollama',  # dummy key (Ollama ignores it)
+# )
+#
+
+openai_endpoint = os.getenv("OPENAI_ENDPOINT")
+openai_api_key = os.getenv("OPENAI_API_KEY")
+
+if openai_api_key:
+    print("The OPENAI_API_KEY is set")
+else:
+    print("The OPENAI_API_KEY environment variable is not set.")
+if openai_endpoint:
+    print("The OPENAI_ENDPOINT is:", openai_endpoint)
+else:
+    print("The OPENAI_ENDPOINT environment variable is not set.")
+
 client = OpenAI(
-    base_url='http://localhost:11434/v1',
-    api_key='ollama',  # dummy key (Ollama ignores it)
+    base_url=openai_endpoint,
+    api_key=openai_api_key,
 )
 
 # Set hardcoded current location (Raleigh, NC)
@@ -62,22 +84,25 @@ with pdfplumber.open("../data/offices.pdf") as pdf:
     for page in pdf.pages:
         pdf_text += page.extract_text() + "\n"
 
-model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
+model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
 
 # Create ChromaDB collection
 chroma_client = chromadb.Client()
 collection = chroma_client.get_or_create_collection(
     name="office_docs",
-    embedding_function=embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+    embedding_function=embedding_functions.SentenceTransformerEmbeddingFunction(
+        model_name="all-MiniLM-L6-v2"
+    ),
 )
 
 # Clean up and embed the PDF lines
-docs = [line.strip() for line in pdf_text.split('\n') if len(line.strip()) > 20]
+docs = [line.strip() for line in pdf_text.split("\n") if len(line.strip()) > 20]
 ids = [f"doc_{i}" for i in range(len(docs))]
 collection.add(documents=docs, ids=ids)
 print(f"Indexed {len(docs)} office documents.")
 
 #  Functions
+
 
 def build_initial_messages(user_input, context_snippets):
     """Builds structured prompt with system context and user query."""
@@ -85,20 +110,48 @@ def build_initial_messages(user_input, context_snippets):
     system_prompt = system_prompt_template + f"\n\nOffice Context:\n{context}"
     return [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_input}
+        {"role": "user", "content": user_input},
     ]
+
 
 def search_vector_db(query):
     """Search ChromaDB for relevant office document snippets."""
     results = collection.query(query_texts=[query], n_results=1)
+    # print(f"vector search results: {results}")
     return results["documents"][0] if results["documents"] else []
+
+
+def search_vector_db_new(query):
+    """Search ChromaDB for relevant office document snippets."""
+
+    distance_threshold = 0.9
+    results = collection.query(query_texts=[query], n_results=1)
+    # print(f"vector search results: {zip(results['documents'])}")
+    results = [
+        doc
+        for doc, dist in zip(results["documents"][0], results["distances"][0])
+        if dist <= distance_threshold
+    ]
+    # print(f"vector search results: {results}")
+    return results[0] if results else []
+
 
 def extract_city_from_rag(snippets):
     """Try to extract known cities directly from office snippets."""
     possible_cities = []
     for snippet in snippets:
-        for city in ["New York", "San Francisco", "Chicago", "Austin", "Boston",
-                     "London", "Toronto", "Tokyo", "Sydney", "Berlin"]:
+        for city in [
+            "New York",
+            "San Francisco",
+            "Chicago",
+            "Austin",
+            "Boston",
+            "London",
+            "Toronto",
+            "Tokyo",
+            "Sydney",
+            "Berlin",
+        ]:
             if city.lower() in snippet.lower():
                 possible_cities.append(city)
     if possible_cities:
@@ -106,36 +159,48 @@ def extract_city_from_rag(snippets):
     else:
         return None
 
+
 def fallback_detect_city_with_llm(text):
     """If RAG fails, use LLM to detect a city from user query."""
     messages = [
-        {"role": "system", "content": "Identify a city mentioned in the user query. Only reply with the city name."},
-        {"role": "user", "content": text}
+        {
+            "role": "system",
+            "content": "Identify a city mentioned in the user query. Only reply with the city name.",
+        },
+        {"role": "user", "content": text},
     ]
-    completion = client.chat.completions.create(
-        model="llama3.2",
-        messages=messages
-    )
+    completion = client.chat.completions.create(model=MODEL, messages=messages)
     raw = completion.choices[0].message.content
     return raw.strip()
+
 
 # Helper: Geocode destination using OpenStreetMap
 def geocode_location(location_query):
     """Use OpenStreetMap Nominatim API to convert a city name into lat/lon."""
-    headers = {'User-Agent': 'SimpleAgent/1.0'}
-    geo = requests.get(f"https://nominatim.openstreetmap.org/search?q={location_query}&format=json", headers=headers).json()
+    headers = {"User-Agent": "SimpleAgent/1.0"}
+    geo = requests.get(
+        f"https://nominatim.openstreetmap.org/search?q={location_query}&format=json",
+        headers=headers,
+    ).json()
     if geo:
-        return float(geo[0]['lat']), float(geo[0]['lon'])
+        return float(geo[0]["lat"]), float(geo[0]["lon"])
     return None, None
+
 
 # Helper: Calculate straight-line distance (haversine formula)
 def haversine_distance(lat1, lon1, lat2, lon2):
     R = 3958.8
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
-    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1))
+        * math.cos(math.radians(lat2))
+        * math.sin(dlon / 2) ** 2
+    )
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
+
 
 #  Tool: Find distance between Raleigh and user location
 def calculate_distance_tool(destination_query):
@@ -146,28 +211,43 @@ def calculate_distance_tool(destination_query):
     miles = haversine_distance(CURRENT_LAT, CURRENT_LON, lat2, lon2)
     return {"destination": destination_query, "distance_miles": round(miles, 2)}
 
+
 def get_city_facts(location_name):
     """Use LLM to retrieve 3 interesting facts about a city."""
     messages = [
-        {"role": "system", "content": "Provide exactly 3 interesting facts about the city. Each fact starts with a dash (-)."},
-        {"role": "user", "content": f"Tell me 3 interesting facts about {location_name}."}
+        {
+            "role": "system",
+            "content": "Provide exactly 3 interesting facts about the city. Each fact starts with a dash (-).",
+        },
+        {
+            "role": "user",
+            "content": f"Tell me 3 interesting facts about {location_name}.",
+        },
     ]
     completion = client.chat.completions.create(
-        model="llama3.2",
+        model=MODEL,
         messages=messages,
     )
     return completion.choices[0].message.content
 
+
 def get_city_facts_list(location_name):
     """Clean up LLM output into a list of 3 facts."""
     text = get_city_facts(location_name)
-    lines = [line.strip() for line in text.split('\n') if line.strip()]
-    if not any(line.startswith('-') or line.startswith('•') for line in lines):
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+    if not any(line.startswith("-") or line.startswith("•") for line in lines):
         return lines[:3]
     else:
-        return [line[1:].strip() for line in lines if line.startswith('-') or line.startswith('•')]
+        return [
+            line[1:].strip()
+            for line in lines
+            if line.startswith("-") or line.startswith("•")
+        ]
 
-def format_final_output(location_name, office_facts_list, city_facts_list, distance_miles):
+
+def format_final_output(
+    location_name, office_facts_list, city_facts_list, distance_miles
+):
     """Format final combined response for the user."""
     output = f"{BOLD}{BLUE}Facts about the Office in {location_name}:{RESET}{BLUE}\n\n"
     for fact in office_facts_list:
@@ -175,13 +255,19 @@ def format_final_output(location_name, office_facts_list, city_facts_list, dista
     output += f"\n{BOLD}{BLUE}Facts about {location_name}:{RESET}{BLUE}\n\n"
     for fact in city_facts_list:
         output += f"• {fact.strip()}\n"
-    output += f"\n{BOLD}{BLUE}Distance from Raleigh, NC:{RESET}{BLUE} {distance_miles} miles"
+    output += (
+        f"\n{BOLD}{BLUE}Distance from Raleigh, NC:{RESET}{BLUE} {distance_miles} miles"
+    )
     return output
+
 
 def display_final_response(location, office_facts, city_facts, distance_miles):
     """Nicely print the final result to the user."""
-    final_output = format_final_output(location, office_facts, city_facts, distance_miles)
+    final_output = format_final_output(
+        location, office_facts, city_facts, distance_miles
+    )
     print(f"\n{GREEN}Assistant Final Response:{RESET}\n\n{BLUE}{final_output}{RESET}")
+
 
 #  Main user interaction loop
 print("\nTravel Assistant ready! (Type 'exit' to quit)")
@@ -195,7 +281,7 @@ while True:
 
     # 1. Search vector DB (office documents) first
     rag_snippets = search_vector_db(user_input)
-    
+
     # Show what query was used
     print(f"\n{RED}RAG Search Query:{RESET} {user_input}")
 
@@ -209,14 +295,20 @@ while True:
 
     # 2. Try to extract city name from RAG first
     detected_city = extract_city_from_rag(rag_snippets)
+    print(f"{RED}>>>> detected city: {detected_city}{RESET}")
 
     # 3. If RAG fails, fallback to user prompt
     if not detected_city:
         detected_city = fallback_detect_city_with_llm(user_input)
+    print(f"{RED}>>>> llm detected city: {detected_city}{RESET}")
 
     if detected_city:
         # 4. Prepare office facts (from RAG)
-        office_facts = [snippet for snippet in rag_snippets if detected_city.lower() in snippet.lower()]
+        office_facts = [
+            snippet
+            for snippet in rag_snippets
+            if detected_city.lower() in snippet.lower()
+        ]
         if not office_facts:
             office_facts = ["(No office information found)"]
 
@@ -231,4 +323,6 @@ while True:
         display_final_response(detected_city, office_facts, city_facts, distance_miles)
 
     else:
-        print(f"\n{GREEN}Assistant Final Response:{RESET}\n{BOLD}Sorry, I couldn't find a relevant location.{RESET}")
+        print(
+            f"\n{GREEN}Assistant Final Response:{RESET}\n{BOLD}Sorry, I couldn't find a relevant location.{RESET}"
+        )
